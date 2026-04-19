@@ -15,6 +15,13 @@ import { scheduleTask } from "octagonal-wheels/concurrency/task";
 export class PeerStorage extends Peer {
     declare config: PeerStorageConf;
 
+    // Paths to exclude from sync (relative path segments)
+    private _ignoredPatterns = [".git", ".obsidian", ".trash", ".DS_Store"];
+
+    private _shouldIgnore(relativePath: string): boolean {
+        const segments = relativePath.split("/");
+        return segments.some(s => this._ignoredPatterns.includes(s));
+    }
 
     constructor(conf: PeerStorageConf, dispatcher: DispatchFun) {
         super(conf, dispatcher);
@@ -157,6 +164,8 @@ export class PeerStorage extends Peer {
         const lP = this.toStoragePath(this.toLocalPath("."));
         const path = this.toPosixPath(relative(lP, pathSrc));
 
+        if (this._shouldIgnore(path)) return;
+
         const data = await this.get(path);
 
         if (data === false) return;
@@ -177,6 +186,8 @@ export class PeerStorage extends Peer {
     async dispatchDeleted(pathSrc: string) {
         const lP = this.toStoragePath(this.toLocalPath("."));
         const path = this.toPosixPath(relative(lP, pathSrc));
+
+        if (this._shouldIgnore(path)) return;
         await scheduleOnceIfDuplicated(pathSrc, async () => {
             await delay(250);
             if (!await this.isRepeating(path, false)) {
