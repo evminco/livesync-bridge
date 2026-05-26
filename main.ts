@@ -3,6 +3,11 @@ import { LOG_LEVEL_DEBUG } from "./lib/src/common/logger.ts";
 import { Hub } from "./Hub.ts";
 import { Config } from "./types.ts";
 import { parseArgs } from "jsr:@std/cli";
+import { EventEmitter } from "node:events";
+
+// Bulk vault sync can fan out many HTTPS requests at once. Keep Node's
+// listener leak warning useful without tripping on normal bridge batches.
+EventEmitter.defaultMaxListeners = 50;
 
 const KEY = "LSB_"
 defaultLoggerEnv.minLogLevel = LOG_LEVEL_DEBUG;
