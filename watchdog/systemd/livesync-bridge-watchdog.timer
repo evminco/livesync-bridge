@@ -1,0 +1,12 @@
+[Unit]
+Description=Run LiveSync Bridge watchdog every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=true
+Unit=livesync-bridge-watchdog.service
+
+[Install]
+WantedBy=timers.target

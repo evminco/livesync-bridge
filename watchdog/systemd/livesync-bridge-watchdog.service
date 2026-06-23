@@ -1,0 +1,7 @@
+[Unit]
+Description=LiveSync Bridge watchdog canary check
+After=livesync-bridge.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/azure/livesync-bridge/watchdog/check_livesync_bridge.sh
