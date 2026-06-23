@@ -23,6 +23,15 @@ export class PeerStorage extends Peer {
         return segments.some(s => this._ignoredPatterns.includes(s));
     }
 
+    private _relativeFromStoragePath(pathSrc: string): string {
+        const lP = this.toStoragePath(this.toLocalPath("."));
+        return this.toPosixPath(relative(lP, pathSrc));
+    }
+
+    private _shouldIgnoreStoragePath(pathSrc: string): boolean {
+        return this._shouldIgnore(this._relativeFromStoragePath(pathSrc));
+    }
+
     constructor(conf: PeerStorageConf, dispatcher: DispatchFun) {
         super(conf, dispatcher);
     }
@@ -37,6 +46,10 @@ export class PeerStorage extends Peer {
             await Deno.remove(path);
             this.receiveLog(` ${path} deleted`);
         } catch (ex) {
+            if (ex instanceof Deno.errors.NotFound) {
+                this.receiveLog(` ${path} already deleted`);
+                return true;
+            }
             this.receiveLog(` ${path} delete failed`, LOG_LEVEL_NOTICE);
             Logger(ex, LOG_LEVEL_VERBOSE);
             return false;
@@ -141,22 +154,27 @@ export class PeerStorage extends Peer {
     async get(pathSrc: string): Promise<false | FileData> {
         const lp = this.toLocalPath(pathSrc);
         const path = this.toStoragePath(lp);
-        const stat = await Deno.stat(path);
-        if (!stat.isFile) {
+        try {
+            const stat = await Deno.stat(path);
+            if (!stat.isFile) {
+                return false;
+            }
+            const ret: FileData = {
+                ctime: stat.mtime?.getTime() ?? 0,
+                mtime: stat.mtime?.getTime() ?? 0,
+                size: stat.size,
+                data: [],
+            };
+            if (isPlainText(path)) {
+                ret.data = [await Deno.readTextFile(path)];
+            } else {
+                ret.data = await Deno.readFile(path);
+            }
+            return ret;
+        } catch (ex) {
+            Logger(ex, LOG_LEVEL_VERBOSE);
             return false;
         }
-        const ret: FileData = {
-            ctime: stat.mtime?.getTime() ?? 0,
-            mtime: stat.mtime?.getTime() ?? 0,
-            size: stat.size,
-            data: [],
-        };
-        if (isPlainText(path)) {
-            ret.data = [await Deno.readTextFile(path)];
-        } else {
-            ret.data = await Deno.readFile(path);
-        }
-        return ret;
     }
     watcher?: chokidar.FSWatcher;
 
@@ -213,15 +231,21 @@ export class PeerStorage extends Peer {
         const lp = this.toLocalPath(pathSrc);
         const key = `file-stat-${lp}`;
         const path = this.toStoragePath(lp);
-        const stat = statSrc ?? await Deno.stat(path);
-        if (!stat.isFile) {
+        try {
+            const stat = statSrc ?? await Deno.stat(path);
+            if (!stat.isFile) {
+                return false;
+            }
+            const fileStat = `${stat.mtime?.getTime() ?? 0}-${stat.size}`;
+            this.setSetting(key, fileStat);
+        } catch (ex) {
+            Logger(ex, LOG_LEVEL_VERBOSE);
             return false;
         }
-        const fileStat = `${stat.mtime?.getTime() ?? 0}-${stat.size}`;
-        this.setSetting(key, fileStat);
     }
 
     async isChanged(pathSrc: string) {
+        if (this._shouldIgnore(pathSrc)) return false;
         const lp = this.toLocalPath(pathSrc);
         const key = `file-stat-${lp}`;
         const last = this.getSetting(key);
@@ -229,23 +253,30 @@ export class PeerStorage extends Peer {
         // console.log(`RV:${last}`);
 
         const path = this.toStoragePath(lp);
-        const stat = await Deno.stat(path);
-        if (!stat.isFile) {
+        try {
+            const stat = await Deno.stat(path);
+            if (!stat.isFile) {
+                return false;
+            }
+            if (!last) return true;
+            const fileStat = `${stat.mtime?.getTime() ?? 0}-${stat.size}`;
+            // console.log(`RVX:${fileStat}`);
+            if (last !== fileStat) return true;
+            return false;
+        } catch (ex) {
+            Logger(ex, LOG_LEVEL_VERBOSE);
             return false;
         }
-        if (!last) return true;
-        const fileStat = `${stat.mtime?.getTime() ?? 0}-${stat.size}`;
-        // console.log(`RVX:${fileStat}`);
-        if (last !== fileStat) return true;
-        return false;
     }
     watcherDeno?: Deno.FsWatcher;
 
     processFile(event: Deno.FsEvent) {
         for (const path of event.paths) {
+            if (this._shouldIgnoreStoragePath(path)) continue;
             const key = `${event.kind}-${path}`;
             // const key = path;
             scheduleTask(key, 100, async () => {
+                if (this._shouldIgnoreStoragePath(path)) return;
                 const existence = await Deno.stat(path).catch(() => null);
                 if (existence) {
                     if (existence.isFile) {
@@ -269,8 +300,9 @@ export class PeerStorage extends Peer {
         this.normalLog(`Scan offline changes: ${this.config.scanOfflineChanges ? "Enabled, now starting..." : "Disabled"}`);
         if (this.config.scanOfflineChanges) {
             for await (const entry of walk(lP)) {
+                if (this._shouldIgnoreStoragePath(entry.path)) continue;
                 if (entry.isFile) {
-                    const ePath = this.toPosixPath(relative(this.toLocalPath("."), entry.path));
+                    const ePath = this._relativeFromStoragePath(entry.path);
                     if (await this.isChanged(ePath)) {
                         this.debugLog(`Offline changes detected: ${ePath}`);
                         await this.dispatch(entry.path);
@@ -310,7 +342,8 @@ export class PeerStorage extends Peer {
             });
 
         this.watcher.on("change", async (path) => {
-            const ePath = this.toPosixPath(relative(this.toLocalPath("."), path));
+            if (this._shouldIgnoreStoragePath(path)) return;
+            const ePath = this._relativeFromStoragePath(path);
             if (!await this.isChanged(ePath)) {
                 // this.debugLog(`Not changed: ${ePath}`);
             } else {
@@ -319,7 +352,8 @@ export class PeerStorage extends Peer {
             }
         })
         this.watcher.on("add", async (path) => {
-            const ePath = this.toPosixPath(relative(this.toLocalPath("."), path));
+            if (this._shouldIgnoreStoragePath(path)) return;
+            const ePath = this._relativeFromStoragePath(path);
             if (!await this.isChanged(ePath)) {
                 // this.debugLog(`Not changed: ${ePath}`);
             } else {
@@ -328,7 +362,8 @@ export class PeerStorage extends Peer {
             }
         })
         this.watcher.on("unlink", async (path) => {
-            const ePath = this.toPosixPath(relative(this.toLocalPath("."), path));
+            if (this._shouldIgnoreStoragePath(path)) return;
+            const ePath = this._relativeFromStoragePath(path);
             this.debugLog(`Unlink detected: ${ePath}`);
             await this.dispatchDeleted(path)
         })
