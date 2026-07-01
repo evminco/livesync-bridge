@@ -10,9 +10,9 @@ export class Hub {
     constructor(conf: Config) {
         this.conf = conf;
     }
-    start() {
+    async start() {
         for (const p of this.peers) {
-            p.stop();
+            await p.stop();
         }
         this.peers = [];
         for (const peer of this.conf.peers) {
@@ -26,8 +26,11 @@ export class Hub {
                 throw new Error(`Unexpected Peer type: ${(peer as any)?.name} - ${(peer as any)?.type}`);
             }
         }
+        // Start peers sequentially. The CouchDB peer must finish initialising
+        // before the storage peer scans offline changes, otherwise restored
+        // file bursts can dispatch into a half-open DB.
         for (const p of this.peers) {
-            p.start();
+            await p.start();
         }
     }
 

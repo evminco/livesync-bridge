@@ -335,6 +335,7 @@ export class PeerStorage extends Peer {
         this.normalLog(`Scan offline changes: ${this.config.scanOfflineChanges ? "Enabled, now starting..." : "Disabled"}`);
         this.watcher = chokidar.watch(lP,
             {
+                ignored: (path) => this._shouldIgnoreStoragePath(path),
                 ignoreInitial: !this.config.scanOfflineChanges,
                 awaitWriteFinish: {
                     stabilityThreshold: 500,

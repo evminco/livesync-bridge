@@ -38,6 +38,10 @@ export class PeerCouchDB extends Peer {
     }
     async put(pathSrc: string, data: FileData): Promise<boolean> {
         const path = this.toLocalPath(pathSrc);
+        // Local offline-change scanning can dispatch before the CouchDB manipulator
+        // has finished initialising. Wait here so bursts of restored files do not
+        // crash on an uninitialised entryManager.
+        await this.man.ready.promise;
         if (await this.isRepeating(pathSrc, data)) {
             return false;
         }
