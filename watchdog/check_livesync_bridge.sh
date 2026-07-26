@@ -3,12 +3,18 @@ set -euo pipefail
 
 LOG="/home/azure/livesync-bridge/watchdog/watchdog.log"
 VAULT="/home/azure/.openclaw/workspace/memory/obsidian"
-CANARY_REL="03 Resources/800 - Tech/200 - OpenClaw/livesync-bridge-canary.md"
-CANARY="$VAULT/$CANARY_REL"
 NOW_ISO="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+CANARY_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+CANARY_REL="03 Resources/800 - Tech/200 - OpenClaw/canaries/livesync-bridge-canary-${CANARY_STAMP}.txt"
+CANARY="$VAULT/$CANARY_REL"
 SINCE="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
 
 mkdir -p "$(dirname "$LOG")" "$(dirname "$CANARY")"
+
+cleanup() {
+  rm -f -- "$CANARY"
+}
+trap cleanup EXIT
 
 log() {
   printf '%s %s\n' "$(date -u '+%Y-%m-%d %H:%M:%S UTC')" "$*" >> "$LOG"
@@ -24,10 +30,9 @@ if ! systemctl --user is-active --quiet livesync-bridge.service; then
 fi
 
 cat > "$CANARY" <<EOF
-# LiveSync Bridge Canary
-
+LiveSync Bridge Canary
 Updated: $NOW_ISO
-Purpose: sync-health canary maintained by livesync-bridge watchdog.
+Purpose: temporary sync-health canary maintained by livesync-bridge watchdog.
 EOF
 
 for _ in $(seq 1 12); do
