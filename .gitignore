@@ -3,4 +3,5 @@ vault*/*
 !.gitempty
 !*.sample.json
 *.log
+watchdog/state/
 node_modules

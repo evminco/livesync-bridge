@@ -342,32 +342,46 @@ export class PeerStorage extends Peer {
                 },
             });
 
-        this.watcher.on("change", async (path) => {
-            if (this._shouldIgnoreStoragePath(path)) return;
-            const ePath = this._relativeFromStoragePath(path);
-            if (!await this.isChanged(ePath)) {
-                // this.debugLog(`Not changed: ${ePath}`);
-            } else {
-                this.debugLog(`Changes detected: ${ePath}`);
-                await this.dispatch(path);
-            }
-        })
-        this.watcher.on("add", async (path) => {
-            if (this._shouldIgnoreStoragePath(path)) return;
-            const ePath = this._relativeFromStoragePath(path);
-            if (!await this.isChanged(ePath)) {
-                // this.debugLog(`Not changed: ${ePath}`);
-            } else {
-                this.debugLog(`New detected: ${ePath}`);
-                await this.dispatch(path);
-            }
-        })
-        this.watcher.on("unlink", async (path) => {
-            if (this._shouldIgnoreStoragePath(path)) return;
-            const ePath = this._relativeFromStoragePath(path);
-            this.debugLog(`Unlink detected: ${ePath}`);
-            await this.dispatchDeleted(path)
-        })
+        const handleWatcherError = (context: string, error: unknown) => {
+            this.normalLog(`Storage watcher ${context} failed; continuing`, LOG_LEVEL_NOTICE);
+            Logger(error, LOG_LEVEL_NOTICE);
+        };
+
+        this.watcher.on("error", (error) => {
+            handleWatcherError("event", error);
+        });
+        this.watcher.on("change", (path) => {
+            void (async () => {
+                if (this._shouldIgnoreStoragePath(path)) return;
+                const ePath = this._relativeFromStoragePath(path);
+                if (!await this.isChanged(ePath)) {
+                    // this.debugLog(`Not changed: ${ePath}`);
+                } else {
+                    this.debugLog(`Changes detected: ${ePath}`);
+                    await this.dispatch(path);
+                }
+            })().catch((error) => handleWatcherError("change handler", error));
+        });
+        this.watcher.on("add", (path) => {
+            void (async () => {
+                if (this._shouldIgnoreStoragePath(path)) return;
+                const ePath = this._relativeFromStoragePath(path);
+                if (!await this.isChanged(ePath)) {
+                    // this.debugLog(`Not changed: ${ePath}`);
+                } else {
+                    this.debugLog(`New detected: ${ePath}`);
+                    await this.dispatch(path);
+                }
+            })().catch((error) => handleWatcherError("add handler", error));
+        });
+        this.watcher.on("unlink", (path) => {
+            void (async () => {
+                if (this._shouldIgnoreStoragePath(path)) return;
+                const ePath = this._relativeFromStoragePath(path);
+                this.debugLog(`Unlink detected: ${ePath}`);
+                await this.dispatchDeleted(path);
+            })().catch((error) => handleWatcherError("unlink handler", error));
+        });
     }
     async stop() {
         this.watcher?.close();
