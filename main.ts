@@ -4,6 +4,12 @@ import { Hub } from "./Hub.ts";
 import { Config } from "./types.ts";
 import { parseArgs } from "jsr:@std/cli";
 import { EventEmitter } from "node:events";
+import { setDefaultResultOrder } from "node:dns";
+
+// This host has no working IPv6 egress, and sync.lz-osync.uk publishes AAAA
+// records. Deno's Node-compat HTTPS stack does not reliably fall back to IPv4,
+// which produced intermittent FetchErrors with an empty reason. Prefer IPv4.
+setDefaultResultOrder("ipv4first");
 
 // Bulk vault sync can fan out many HTTPS requests at once. Keep Node's
 // listener leak warning useful without tripping on normal bridge batches.
