@@ -1,4 +1,4 @@
 [submodule "lib"]
 	path = lib
-	url = git@github.com:evminco/livesync-bridge.git
-	branch = lib/locul-prod
+	url = git@github.com:evminco/livesync-commonlib.git
+	branch = locul-prod
