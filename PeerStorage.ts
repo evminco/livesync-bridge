@@ -15,6 +15,7 @@ import { scheduleTask } from "octagonal-wheels/concurrency/task";
 
 export class PeerStorage extends Peer {
     declare config: PeerStorageConf;
+    private _watcherQueue = new BoundedKeyedQueue(4);
     private _dispatchQueue = new BoundedKeyedQueue(4);
 
     // Paths to exclude from sync (relative path segments)
@@ -362,7 +363,7 @@ export class PeerStorage extends Peer {
             handleWatcherError("event", error);
         });
         this.watcher.on("change", (path) => {
-            void (async () => {
+            void this._watcherQueue.run(path, async () => {
                 if (this._shouldIgnoreStoragePath(path)) return;
                 const ePath = this._relativeFromStoragePath(path);
                 if (!await this.isChanged(ePath)) {
@@ -371,10 +372,10 @@ export class PeerStorage extends Peer {
                     this.debugLog(`Changes detected: ${ePath}`);
                     await this.dispatch(path);
                 }
-            })().catch((error) => handleWatcherError("change handler", error));
+            }).catch((error) => handleWatcherError("change handler", error));
         });
         this.watcher.on("add", (path) => {
-            void (async () => {
+            void this._watcherQueue.run(path, async () => {
                 if (this._shouldIgnoreStoragePath(path)) return;
                 const ePath = this._relativeFromStoragePath(path);
                 if (!await this.isChanged(ePath)) {
@@ -383,15 +384,15 @@ export class PeerStorage extends Peer {
                     this.debugLog(`New detected: ${ePath}`);
                     await this.dispatch(path);
                 }
-            })().catch((error) => handleWatcherError("add handler", error));
+            }).catch((error) => handleWatcherError("add handler", error));
         });
         this.watcher.on("unlink", (path) => {
-            void (async () => {
+            void this._watcherQueue.run(path, async () => {
                 if (this._shouldIgnoreStoragePath(path)) return;
                 const ePath = this._relativeFromStoragePath(path);
                 this.debugLog(`Unlink detected: ${ePath}`);
                 await this.dispatchDeleted(path);
-            })().catch((error) => handleWatcherError("unlink handler", error));
+            }).catch((error) => handleWatcherError("unlink handler", error));
         });
     }
     async stop() {
