@@ -16,7 +16,9 @@ The `.txt` extension keeps temporary canaries out of OpenClaw's Markdown memory 
 - A filesystem lock prevents timer and manual invocations from overlapping.
 - Pending paths are reconciled before a new canary is created.
 - If a round trip stalls, the watchdog restarts `livesync-bridge.service` once and retries the same path.
-- There is no restart loop. A second failure exits non-zero and retains the pending path for the next invocation.
+- A second failure moves the path from pending state to `quarantined-canaries.txt` with a UTC timestamp and failure reason, then exits non-zero.
+- An unresolved quarantine is a circuit breaker: later invocations fail before writing or retrying any canary. This prevents repeated poisoned paths and unlimited new-canary accumulation.
+- Quarantine entries are never cleared automatically. An operator must verify remote/local cleanup, then explicitly acknowledge the incident by removing the corresponding state entry before running the watchdog again.
 - Chokidar event and async-handler errors are caught in `PeerStorage.ts` so a disappearing canary does not become an unhandled watcher failure.
 
 Runtime state and logs are intentionally untracked:
@@ -34,4 +36,4 @@ systemctl --user is-active livesync-bridge-watchdog.timer
 tail -n 20 watchdog/watchdog.log
 ```
 
-A successful run logs `OK: Canary upload and cleanup observed`, leaves the pending-state file empty, and leaves no timestamped `.txt` canary in the local vault.
+A successful run logs `OK: Canary upload and cleanup observed`, leaves the pending-state file empty, leaves the quarantine file empty, and leaves no timestamped `.txt` canary in the local vault. A run with unresolved quarantine must log a clear failure and create no new canary.

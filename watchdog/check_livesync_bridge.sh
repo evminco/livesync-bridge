@@ -5,6 +5,7 @@ LOG="/home/azure/livesync-bridge/watchdog/watchdog.log"
 VAULT="/home/azure/.openclaw/workspace/memory/obsidian"
 STATE_DIR="/home/azure/livesync-bridge/watchdog/state"
 PENDING_FILE="$STATE_DIR/pending-canaries.txt"
+QUARANTINE_FILE="$STATE_DIR/quarantined-canaries.txt"
 LOCK_FILE="$STATE_DIR/watchdog.lock"
 CANARY_DIR_REL="03 Resources/800 - Tech/200 - OpenClaw/canaries"
 UPLOAD_TIMEOUT_SECONDS=60
@@ -14,7 +15,7 @@ ACTIVE_CANARY=""
 BRIDGE_RESTART_USED=false
 
 mkdir -p "$(dirname "$LOG")" "$STATE_DIR" "$VAULT/$CANARY_DIR_REL"
-touch "$PENDING_FILE"
+touch "$PENDING_FILE" "$QUARANTINE_FILE"
 
 log() {
   printf '%s %s\n' "$(date -u '+%Y-%m-%d %H:%M:%S UTC')" "$*" >> "$LOG"
@@ -39,6 +40,12 @@ fi
 
 if ! systemctl --user is-active --quiet livesync-bridge.service; then
   fail "livesync-bridge.service is not active under user systemd"
+fi
+
+# A quarantine is a circuit breaker. Do not create more canaries while a prior
+# lifecycle failure still requires operator acknowledgement and cleanup.
+if grep -q '[^[:space:]]' "$QUARANTINE_FILE"; then
+  fail "unresolved quarantined canary exists; manual acknowledgement/cleanup required before a new canary"
 fi
 
 is_safe_canary_path() {
@@ -78,6 +85,15 @@ mark_pending() {
   if ! grep -Fxq -- "$path" "$PENDING_FILE"; then
     printf '%s\n' "$path" >> "$PENDING_FILE"
   fi
+}
+
+quarantine_pending() {
+  local path="$1"
+  local reason="$2"
+  if ! grep -Fq -- $'\t'"$path"$'\t' "$QUARANTINE_FILE"; then
+    printf '%s\t%s\t%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$path" "$reason" >> "$QUARANTINE_FILE"
+  fi
+  clear_pending "$path"
 }
 
 clear_pending() {
@@ -174,14 +190,18 @@ reconcile_canary() {
     return 0
   fi
 
-  fail "canary cleanup not confirmed after one bounded bridge restart; pending state retained: $path"
+  quarantine_pending "$path" "cleanup not confirmed after one bounded bridge restart"
+  log "FAIL: canary quarantined after bounded retry; it will not be recreated automatically: $path"
+  return 1
 }
 
 # Recover paths left pending by a timeout, process crash, bridge restart, or
 # delayed remote echo before creating another canary.
 mapfile -t pending_paths < <(grep -v '^[[:space:]]*$' "$PENDING_FILE" || true)
 for pending_path in "${pending_paths[@]}"; do
-  reconcile_canary "$pending_path"
+  if ! reconcile_canary "$pending_path"; then
+    exit 1
+  fi
 done
 
 CANARY_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"

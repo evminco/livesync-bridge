@@ -7,6 +7,7 @@ import { parse, format, relative, dirname, resolve } from "@std/path";
 import { format as posixFormat, parse as posixParse } from "@std/path/posix"
 import { scheduleOnceIfDuplicated } from "octagonal-wheels/concurrency/lock";
 import { DispatchFun, Peer } from "./Peer.ts";
+import { BoundedKeyedQueue } from "./BoundedKeyedQueue.ts";
 import chokidar from "chokidar";
 import { walk } from 'fs/walk';
 
@@ -14,6 +15,7 @@ import { scheduleTask } from "octagonal-wheels/concurrency/task";
 
 export class PeerStorage extends Peer {
     declare config: PeerStorageConf;
+    private _dispatchQueue = new BoundedKeyedQueue(4);
 
     // Paths to exclude from sync (relative path segments)
     private _ignoredPatterns = [".git", ".obsidian", ".trash", ".DS_Store"];
@@ -188,17 +190,19 @@ export class PeerStorage extends Peer {
 
         if (data === false) return;
 
-        scheduleOnceIfDuplicated(pathSrc, async () => {
-            // console.log(data);
-            await this.writeFileStat(path);
-            await delay(250);
-            if (!await this.isRepeating(path, data)) {
-                this.sendLog(`${path} change detected`);
-                await this.dispatchToHub(this, this.toGlobalPath(path), data);
-            }
-            // else {
-            //     this.sendLog(`${path} change repeating detected`);
-            // }
+        await this._dispatchQueue.run(path, async () => {
+            await scheduleOnceIfDuplicated(pathSrc, async () => {
+                // console.log(data);
+                await this.writeFileStat(path);
+                await delay(250);
+                if (!await this.isRepeating(path, data)) {
+                    this.sendLog(`${path} change detected`);
+                    await this.dispatchToHub(this, this.toGlobalPath(path), data);
+                }
+                // else {
+                //     this.sendLog(`${path} change repeating detected`);
+                // }
+            });
         });
     }
     async dispatchDeleted(pathSrc: string) {
@@ -206,12 +210,14 @@ export class PeerStorage extends Peer {
         const path = this.toPosixPath(relative(lP, pathSrc));
 
         if (this._shouldIgnore(path)) return;
-        await scheduleOnceIfDuplicated(pathSrc, async () => {
-            await delay(250);
-            if (!await this.isRepeating(path, false)) {
-                this.sendLog(`${path} delete detected`);
-                await this.dispatchToHub(this, this.toGlobalPath(path), false);
-            }
+        await this._dispatchQueue.run(path, async () => {
+            await scheduleOnceIfDuplicated(pathSrc, async () => {
+                await delay(250);
+                if (!await this.isRepeating(path, false)) {
+                    this.sendLog(`${path} delete detected`);
+                    await this.dispatchToHub(this, this.toGlobalPath(path), false);
+                }
+            });
         });
 
     }
@@ -276,14 +282,19 @@ export class PeerStorage extends Peer {
             const key = `${event.kind}-${path}`;
             // const key = path;
             scheduleTask(key, 100, async () => {
-                if (this._shouldIgnoreStoragePath(path)) return;
-                const existence = await Deno.stat(path).catch(() => null);
-                if (existence) {
-                    if (existence.isFile) {
-                        await this.dispatch(path);
+                try {
+                    if (this._shouldIgnoreStoragePath(path)) return;
+                    const existence = await Deno.stat(path).catch(() => null);
+                    if (existence) {
+                        if (existence.isFile) {
+                            await this.dispatch(path);
+                        }
+                    } else {
+                        await this.dispatchDeleted(path);
                     }
-                } else {
-                    await this.dispatchDeleted(path);
+                } catch (error) {
+                    this.normalLog(`Storage watcher Deno handler failed; continuing: ${path}`, LOG_LEVEL_NOTICE);
+                    Logger(error, LOG_LEVEL_NOTICE);
                 }
             });
         }
