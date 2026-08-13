@@ -17,6 +17,7 @@
         "crypto": "node:crypto",
         "minimatch": "npm:minimatch",
         "fflate": "npm:fflate@^0.8.2",
+        "node-fetch": "npm:node-fetch@2.6.9",
         "pouchdb-core": "npm:pouchdb-core@^9.0.0",
         "pouchdb-adapter-http": "npm:pouchdb-adapter-http@^9.0.0",
         "pouchdb-replication": "npm:pouchdb-replication@^9.0.0",

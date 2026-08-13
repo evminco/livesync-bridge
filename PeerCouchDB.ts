@@ -5,6 +5,7 @@ import { decodeBinary } from "./lib/src/string_and_binary/convert.ts";
 import { isPlainText } from "./lib/src/string_and_binary/path.ts";
 import { DispatchFun, Peer } from "./Peer.ts";
 import { createBinaryBlob, createTextBlob, isDocContentSame, unique } from "./lib/src/common/utils.ts";
+import { couchDbFetch } from "./lib/src/pouchdb/couchdbFetch.ts";
 
 // export class PeerInstance()
 
@@ -207,7 +208,7 @@ export class PeerCouchDB extends Peer {
                 const controller = new AbortController();
                 const fetchTimeout = setTimeout(() => controller.abort(), this._pollTimeoutMs + 10000);
 
-                const resp = await fetch(`${changesUrl}?${params}`, {
+                const resp = await couchDbFetch(`${changesUrl}?${params}`, {
                     method: "POST",
                     headers: {
                         "Authorization": authHeader,
