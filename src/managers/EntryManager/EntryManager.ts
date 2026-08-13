@@ -32,6 +32,7 @@ import type { ChunkFetcher } from "../ChunkFetcher.ts";
 import type { ChunkManager, ChunkWriteOptions } from "../ChunkManager.ts";
 import type { HashManager } from "../HashManager/HashManager.ts";
 import type { ChangeManager } from "../ChangeManager.ts";
+import { mutateWithFreshRevision, writeWithFreshRevision } from "./conflictSafeMetadata.ts";
 
 export interface EntryManagerOptions {
     hashManager: HashManager;
@@ -326,45 +327,50 @@ export class EntryManager {
         const id = await this.path2id(path);
         try {
             return (
-                (await serialized("file:" + path, async () => {
-                    let obj: EntryDocResponse | null = null;
-                    if (opt) {
-                        obj = await this.localDatabase.get(id, opt);
-                    } else {
-                        obj = await this.localDatabase.get(id);
-                    }
+                (await serialized("file:" + id, async () => {
                     const revDeletion = opt && ("rev" in opt ? opt.rev : "") != "";
-
-                    if (obj.type && obj.type == "leaf") {
-                        //do nothing for leaf;
-                        return false;
-                    }
-                    //Check it out and fix docs to regular case
-                    if (!obj.type || (obj.type && obj.type == "notes")) {
-                        obj._deleted = true;
-                        const r = await this.localDatabase.put(obj, { force: !revDeletion });
-                        Logger(`Entry removed:${path} (${obj._id.substring(0, 8)}-${r.rev})`);
-                        return true;
-
-                        // simple note
-                    }
-                    if (obj.type == "newnote" || obj.type == "plain") {
-                        if (revDeletion) {
-                            obj._deleted = true;
-                        } else {
-                            obj.deleted = true;
-                            obj.mtime = Date.now();
-                            if (this.settings.deleteMetadataOfDeletedFiles) {
-                                obj._deleted = true;
+                    const result = await mutateWithFreshRevision<EntryDocResponse>(
+                        this.localDatabase,
+                        id,
+                        (obj) => {
+                            if (obj.type && obj.type == "leaf") {
+                                return false;
                             }
-                        }
-                        const r = await this.localDatabase.put(obj, { force: !revDeletion });
-
-                        Logger(`Entry removed:${path} (${obj._id.substring(0, 8)}-${r.rev})`);
-                        return true;
+                            if (!obj.type || obj.type == "notes") {
+                                obj._deleted = true;
+                            } else if (obj.type == "newnote" || obj.type == "plain") {
+                                if (revDeletion) {
+                                    obj._deleted = true;
+                                } else {
+                                    obj.deleted = true;
+                                    obj.mtime = Date.now();
+                                    if (this.settings.deleteMetadataOfDeletedFiles) {
+                                        obj._deleted = true;
+                                    }
+                                }
+                            } else {
+                                return false;
+                            }
+                            return obj;
+                        },
+                        opt,
+                        {
+                            maxAttempts: 3,
+                            onConflict: ({ attempt, willRetry }) => Logger(
+                                willRetry
+                                    ? `Delete conflict; refetching current revision (${attempt}/3): ${path}`
+                                    : `Delete conflict persisted after 3 fresh-revision attempts: ${path}`,
+                                LOG_LEVEL_NOTICE,
+                            ),
+                        },
+                    );
+                    if (result.status === "conflict" || result.status === "skipped") return false;
+                    if (result.status === "written") {
+                        Logger(`Entry removed:${path} (${id.substring(0, 8)}-${result.response.rev})`);
                     } else {
-                        return false;
+                        Logger(`Entry already removed:${path} (${id.substring(0, 8)})`, LOG_LEVEL_VERBOSE);
                     }
+                    return true;
                 })) ?? false
             );
         } catch (ex: any) {
@@ -521,23 +527,21 @@ export class EntryManager {
             };
 
             return (
-                (await serialized("file:" + filename, async () => {
-                    try {
-                        const old = await this.localDatabase.get(newDoc._id);
-                        newDoc._rev = old._rev;
-                    } catch (ex: any) {
-                        if (isErrorOfMissingDoc(ex)) {
-                            // NO OP/
-                        } else {
-                            throw ex;
-                        }
-                    }
-                    const r = await this.localDatabase.put<PlainEntry | NewEntry>(newDoc, { force: true });
-                    if (r.ok) {
-                        return r;
-                    } else {
-                        return false;
-                    }
+                (await serialized("file:" + newDoc._id, async () => {
+                    const result = await writeWithFreshRevision<PlainEntry | NewEntry>(
+                        this.localDatabase,
+                        newDoc,
+                        {
+                            maxAttempts: 3,
+                            onConflict: ({ attempt, willRetry }) => Logger(
+                                willRetry
+                                    ? `Write conflict; refetching current revision (${attempt}/3): ${dispFilename}`
+                                    : `Write conflict persisted after 3 fresh-revision attempts: ${dispFilename}`,
+                                LOG_LEVEL_NOTICE,
+                            ),
+                        },
+                    );
+                    return result.status === "written" ? result.response : false;
                 })) ?? false
             );
         });
