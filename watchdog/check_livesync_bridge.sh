@@ -11,6 +11,8 @@ CANARY_DIR_REL="03 Resources/800 - Tech/200 - OpenClaw/canaries"
 UPLOAD_TIMEOUT_SECONDS=60
 DELETE_TIMEOUT_SECONDS=60
 SETTLE_SECONDS=10
+# Retry a valid quarantined canary after a bounded 30 minute cooldown.
+QUARANTINE_COOLDOWN_SECONDS=1800
 ACTIVE_CANARY=""
 BRIDGE_RESTART_USED=false
 
@@ -38,19 +40,55 @@ if ! flock -n 9; then
   fail "another watchdog invocation is already running"
 fi
 
-if ! systemctl --user is-active --quiet livesync-bridge.service; then
-  fail "livesync-bridge.service is not active under user systemd"
-fi
-
-# A quarantine is a circuit breaker. Do not create more canaries while a prior
-# lifecycle failure still requires operator acknowledgement and cleanup.
-if grep -q '[^[:space:]]' "$QUARANTINE_FILE"; then
-  fail "unresolved quarantined canary exists; manual acknowledgement/cleanup required before a new canary"
-fi
-
 is_safe_canary_path() {
   local path="$1"
-  [[ "$path" == "$CANARY_DIR_REL"/livesync-bridge-canary-*.txt ]]
+  local leaf
+
+  [[ "$path" == "$CANARY_DIR_REL/"* ]] || return 1
+  leaf="${path#"$CANARY_DIR_REL/"}"
+  [[ "$leaf" =~ ^livesync-bridge-canary-[0-9]{8}T[0-9]{6}Z[.]txt$ ]]
+}
+
+path_in_list() {
+  local needle="$1"
+  shift
+  local candidate
+
+  for candidate in "$@"; do
+    if [[ "$candidate" == "$needle" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+parse_quarantine_record() {
+  local record="$1"
+  local extra=""
+  local epoch
+
+  QUARANTINE_TS=""
+  QUARANTINE_PATH=""
+  QUARANTINE_REASON=""
+  QUARANTINE_EPOCH=""
+
+  IFS=$'\t' read -r QUARANTINE_TS QUARANTINE_PATH QUARANTINE_REASON extra <<< "$record"
+
+  if [[ -n "$extra" || -z "$QUARANTINE_TS" || -z "$QUARANTINE_PATH" || -z "$QUARANTINE_REASON" ]]; then
+    return 1
+  fi
+  if ! [[ "$QUARANTINE_TS" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+    return 1
+  fi
+  if ! epoch="$(date -u -d "$QUARANTINE_TS" +%s 2>/dev/null)"; then
+    return 1
+  fi
+  if ! is_safe_canary_path "$QUARANTINE_PATH"; then
+    return 2
+  fi
+
+  QUARANTINE_EPOCH="$epoch"
+  return 0
 }
 
 journal_has_since() {
@@ -82,25 +120,75 @@ wait_for_journal() {
 
 mark_pending() {
   local path="$1"
-  if ! grep -Fxq -- "$path" "$PENDING_FILE"; then
-    printf '%s\n' "$path" >> "$PENDING_FILE"
+  local tmp
+
+  if grep -Fxq -- "$path" "$PENDING_FILE"; then
+    return 0
   fi
+
+  tmp="$(mktemp "$STATE_DIR/pending-canaries.XXXXXX")"
+  cat "$PENDING_FILE" > "$tmp"
+  printf '%s\n' "$path" >> "$tmp"
+  mv "$tmp" "$PENDING_FILE"
+}
+
+clear_pending() {
+  local path="$1"
+  local tmp
+  tmp="$(mktemp "$STATE_DIR/pending-canaries.XXXXXX")"
+  grep -Fvx -- "$path" "$PENDING_FILE" > "$tmp" || true
+  mv "$tmp" "$PENDING_FILE"
+}
+
+quarantine_path_exists() {
+  local path="$1"
+  local record
+
+  while IFS= read -r record || [[ -n "$record" ]]; do
+    if [[ "$record" =~ [^[:space:]] ]] \
+      && parse_quarantine_record "$record" \
+      && [[ "$QUARANTINE_PATH" == "$path" ]]; then
+      return 0
+    fi
+  done < "$QUARANTINE_FILE"
+  return 1
 }
 
 quarantine_pending() {
   local path="$1"
   local reason="$2"
-  if ! grep -Fq -- $'\t'"$path"$'\t' "$QUARANTINE_FILE"; then
-    printf '%s\t%s\t%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$path" "$reason" >> "$QUARANTINE_FILE"
+  local tmp
+
+  if ! quarantine_path_exists "$path"; then
+    tmp="$(mktemp "$STATE_DIR/quarantined-canaries.XXXXXX")"
+    cat "$QUARANTINE_FILE" > "$tmp"
+    printf '%s\t%s\t%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$path" "$reason" >> "$tmp"
+    mv "$tmp" "$QUARANTINE_FILE"
   fi
   clear_pending "$path"
 }
 
-clear_pending() {
+clear_quarantine_path() {
   local path="$1"
-  local tmp="$PENDING_FILE.tmp"
-  grep -Fvx -- "$path" "$PENDING_FILE" > "$tmp" || true
-  mv "$tmp" "$PENDING_FILE"
+  local tmp record removed=false
+
+  tmp="$(mktemp "$STATE_DIR/quarantined-canaries.XXXXXX")"
+  while IFS= read -r record || [[ -n "$record" ]]; do
+    if [[ "$record" =~ [^[:space:]] ]] \
+      && parse_quarantine_record "$record" \
+      && [[ "$QUARANTINE_PATH" == "$path" ]]; then
+      removed=true
+      continue
+    fi
+    printf '%s\n' "$record" >> "$tmp"
+  done < "$QUARANTINE_FILE"
+
+  if [[ "$removed" != true ]]; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+
+  mv "$tmp" "$QUARANTINE_FILE"
 }
 
 write_canary() {
@@ -191,9 +279,67 @@ reconcile_canary() {
   fi
 
   quarantine_pending "$path" "cleanup not confirmed after one bounded bridge restart"
-  log "FAIL: canary quarantined after bounded retry; it will not be recreated automatically: $path"
+  log "FAIL: canary quarantined after bounded retry; automatic retry deferred until cooldown expires: $path"
   return 1
 }
+
+process_quarantines() {
+  local now_epoch record status age_seconds remaining_seconds quarantined_path
+  local quarantine_records=()
+  local eligible_paths=()
+
+  mapfile -t quarantine_records < <(grep -v '^[[:space:]]*$' "$QUARANTINE_FILE" || true)
+  if (( ${#quarantine_records[@]} == 0 )); then
+    return 0
+  fi
+
+  now_epoch="$(date -u +%s)"
+  for record in "${quarantine_records[@]}"; do
+    status=0
+    parse_quarantine_record "$record" || status=$?
+    case "$status" in
+      0) ;;
+      1) fail "malformed quarantined canary record; leaving quarantine unchanged" ;;
+      2) fail "unsafe quarantined canary path; leaving quarantine unchanged: $QUARANTINE_PATH" ;;
+      *) fail "could not parse quarantined canary record; leaving quarantine unchanged" ;;
+    esac
+
+    age_seconds=$((now_epoch - QUARANTINE_EPOCH))
+    if (( age_seconds < QUARANTINE_COOLDOWN_SECONDS )); then
+      remaining_seconds=$((QUARANTINE_COOLDOWN_SECONDS - age_seconds))
+      fail "quarantined canary cooldown active (${remaining_seconds}s remaining); no new canary created: $QUARANTINE_PATH"
+    fi
+
+    if ! path_in_list "$QUARANTINE_PATH" "${eligible_paths[@]}"; then
+      eligible_paths+=("$QUARANTINE_PATH")
+    fi
+  done
+
+  if ! systemctl --user is-active --quiet livesync-bridge.service; then
+    fail "livesync-bridge.service is not active under user systemd"
+  fi
+
+  for quarantined_path in "${eligible_paths[@]}"; do
+    # Stage as pending before clearing quarantine so an interruption resumes the
+    # same path instead of losing cleanup state.
+    mark_pending "$quarantined_path"
+    if ! clear_quarantine_path "$quarantined_path"; then
+      fail "failed to atomically clear quarantined canary path; leaving run failed: $quarantined_path"
+    fi
+    log "WARN: Rechecking eligible quarantined canary after cooldown: $quarantined_path"
+    if ! reconcile_canary "$quarantined_path"; then
+      exit 1
+    fi
+  done
+}
+
+# A quarantine remains a circuit breaker, but an old, valid record is retried
+# after a bounded cooldown so transient remote cleanup failures self-recover.
+process_quarantines
+
+if ! systemctl --user is-active --quiet livesync-bridge.service; then
+  fail "livesync-bridge.service is not active under user systemd"
+fi
 
 # Recover paths left pending by a timeout, process crash, bridge restart, or
 # delayed remote echo before creating another canary.
